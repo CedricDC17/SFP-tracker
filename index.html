@@ -102,13 +102,15 @@
   <script type="text/babel">
     const { useState, useEffect, useCallback, useRef } = React;
 
-    const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbzw04WYRGusckxzndtIN7a9eXZGqGV_wmMyrerrNdlgOSafed936R4BunAi2BAK9YB8/exec";
+    const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbysjrOUGqrtr9IYI8sgG8RKiZC4Nxm13qYwK8D7XzoRm4q96ogeVVH3QTjTNTvvj_Wo/exec";
     const OBJECTIF = 140;
     const LS_HEURES = "tracker-heures";
     const LS_SESSION = "tracker-session";
+    const LS_MONTH = "tracker-month";
 
     const now = new Date();
     const DAYS_IN_MONTH = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
+    const CURRENT_MONTH_KEY = `${now.getFullYear()}-${now.getMonth()}`;
 
     const EMPTY_DATA = Array.from({ length: DAYS_IN_MONTH }, (_, i) => ({
       jour: i + 1, date: null, heures: null, minutes: null
@@ -126,9 +128,7 @@
       return (h || 0) + (m || 0) / 60;
     }
 
-    function toTotalMin(h, m) {
-      return (h || 0) * 60 + (m || 0);
-    }
+    function toTotalMin(h, m) { return (h || 0) * 60 + (m || 0); }
 
     function formatDuration(totalMin) {
       if (!totalMin || totalMin === 0) return "—";
@@ -149,16 +149,14 @@
     }
 
     function formatTime(ts) {
-      const d = new Date(ts);
+      const d = new Date(parseInt(ts));
       return `${String(d.getHours()).padStart(2,"0")}:${String(d.getMinutes()).padStart(2,"0")}`;
     }
 
     function parseHeures(val) {
       if (val === null || val === "" || val === undefined) return { h: null, m: null };
       if (typeof val === "number") {
-        const h = Math.floor(val);
-        const m = Math.round((val - h) * 60);
-        return { h, m };
+        const h = Math.floor(val); const m = Math.round((val - h) * 60); return { h, m };
       }
       if (typeof val === "string") {
         const match = val.match(/^(\d+):(\d+)/);
@@ -191,18 +189,26 @@
     }
 
     async function postToSheets(body) {
-      await fetch(SCRIPT_URL, {
-        method: "POST",
-        mode: "no-cors",
-        body: JSON.stringify(body),
-        headers: { "Content-Type": "text/plain" }
-      });
+      try {
+        await fetch(SCRIPT_URL, {
+          method: "POST", mode: "no-cors",
+          body: JSON.stringify(body),
+          headers: { "Content-Type": "text/plain" }
+        });
+      } catch {}
     }
 
     function App() {
       const [days, setDays] = useState(() => {
         try {
+          const savedMonth = localStorage.getItem(LS_MONTH);
           const saved = localStorage.getItem(LS_HEURES);
+          // Invalide le cache si c'est un autre mois
+          if (savedMonth !== CURRENT_MONTH_KEY) {
+            localStorage.removeItem(LS_HEURES);
+            localStorage.removeItem(LS_MONTH);
+            return EMPTY_DATA;
+          }
           if (saved) {
             const parsed = JSON.parse(saved);
             if (parsed.length === DAYS_IN_MONTH) return parsed;
@@ -216,22 +222,18 @@
       const [today] = useState(new Date().getDate());
       const [syncStatus, setSyncStatus] = useState("idle");
       const [syncMsg, setSyncMsg] = useState("Chargement…");
-
-      // Session pointage
-      const [sessionTs, setSessionTs] = useState(() => {
-        try { return localStorage.getItem(LS_SESSION) || null; } catch { return null; }
-      });
+      const [sessionTs, setSessionTs] = useState(null); // toujours null au départ, le Sheet est prioritaire
       const [chronoDisplay, setChronoDisplay] = useState("");
       const chronoRef = useRef(null);
 
       // Chrono live
       useEffect(() => {
-        if (!sessionTs) { setChronoDisplay(""); return; }
+        if (!sessionTs) { setChronoDisplay(""); clearInterval(chronoRef.current); return; }
         const update = () => {
           const diff = Date.now() - parseInt(sessionTs);
           const h = Math.floor(diff / 3600000);
           const m = Math.floor((diff % 3600000) / 60000);
-          setChronoDisplay(`${formatTime(parseInt(sessionTs))} · ${h > 0 ? h+"h" : ""}${String(m).padStart(2,"0")}min`);
+          setChronoDisplay(`${formatTime(sessionTs)} · ${h > 0 ? h+"h" : ""}${String(m).padStart(2,"0")}min`);
         };
         update();
         chronoRef.current = setInterval(update, 30000);
@@ -240,16 +242,15 @@
 
       // Reset à minuit
       useEffect(() => {
-        const checkMidnight = () => {
+        const interval = setInterval(() => {
           const n = new Date();
           if (n.getHours() === 0 && n.getMinutes() === 0 && sessionTs) {
-            alert("Session de pointage en cours resetée — pense à pointer demain !");
+            alert("Session de pointage resetée — pense à pointer demain !");
             localStorage.removeItem(LS_SESSION);
             setSessionTs(null);
             postToSheets({ type: "session_end_midnight" });
           }
-        };
-        const interval = setInterval(checkMidnight, 60000);
+        }, 60000);
         return () => clearInterval(interval);
       }, [sessionTs]);
 
@@ -259,20 +260,35 @@
         try {
           const json = await jsonpFetch(SCRIPT_URL);
           if (!json.ok) throw new Error(json.error || "Erreur serveur");
+
           const newDays = json.data.slice(0, DAYS_IN_MONTH).map((row, i) => {
             const { h, m } = parseHeures(row.heures);
             return { jour: i + 1, date: row.date || null, heures: h, minutes: m };
           });
           setDays(newDays);
           localStorage.setItem(LS_HEURES, JSON.stringify(newDays));
-          // Récupère session depuis Sheet si localStorage vide
-          if (!localStorage.getItem(LS_SESSION) && json.session) {
-            localStorage.setItem(LS_SESSION, json.session);
-            setSessionTs(json.session);
+          localStorage.setItem(LS_MONTH, CURRENT_MONTH_KEY);
+
+          // Sheet est prioritaire pour la session
+          const sheetSession = json.session;
+          const localSession = localStorage.getItem(LS_SESSION);
+
+          if (sheetSession) {
+            // Sheet a une session → c'est la vérité
+            localStorage.setItem(LS_SESSION, sheetSession);
+            setSessionTs(sheetSession);
+          } else {
+            // Sheet dit vide → on efface localStorage même s'il avait quelque chose
+            if (localSession) localStorage.removeItem(LS_SESSION);
+            setSessionTs(null);
           }
+
           setSyncStatus("ok");
           setSyncMsg("Synced ✓");
         } catch {
+          // Offline : on utilise localStorage mais le Sheet reste prioritaire au prochain sync
+          const localSession = localStorage.getItem(LS_SESSION);
+          if (localSession) setSessionTs(localSession);
           setSyncStatus("error");
           setSyncMsg("Hors ligne — données locales");
         }
@@ -282,6 +298,7 @@
 
       const saveToSheets = useCallback(async (newDays) => {
         localStorage.setItem(LS_HEURES, JSON.stringify(newDays));
+        localStorage.setItem(LS_MONTH, CURRENT_MONTH_KEY);
         setSyncStatus("saving");
         setSyncMsg("Sauvegarde…");
         try {
@@ -299,20 +316,17 @@
 
       const handlePointer = async () => {
         if (!sessionTs) {
-          // Entrée
           const ts = Date.now().toString();
           localStorage.setItem(LS_SESSION, ts);
           setSessionTs(ts);
-          try { await postToSheets({ type: "session_start", timestamp: ts }); } catch {}
+          await postToSheets({ type: "session_start", timestamp: ts });
         } else {
-          // Sortie
           const entreeTs = parseInt(sessionTs);
           const sortieTs = Date.now();
           const diffMin = Math.round((sortieTs - entreeTs) / 60000);
           const todayDay = new Date().getDate();
           const todayDate = new Date().toLocaleDateString("fr-FR", { weekday: "long", day: "numeric", month: "long" });
 
-          // Ajoute au jour en cours
           const newDays = days.map(d => {
             if (d.jour !== todayDay) return d;
             const existingMin = toTotalMin(d.heures, d.minutes);
@@ -323,18 +337,14 @@
           localStorage.removeItem(LS_SESSION);
           setSessionTs(null);
 
-          // Log + sync
-          const dureeDecimal = diffMin / 60;
-          const dureeFormatee = formatDuration(diffMin);
-          try {
-            await postToSheets({ type: "session_end",
-              date: todayDate,
-              entree: formatTime(entreeTs),
-              sortie: formatTime(sortieTs),
-              dureeDecimal: Math.round(dureeDecimal * 100) / 100,
-              dureeFormatee
-            });
-          } catch {}
+          await postToSheets({
+            type: "session_end",
+            date: todayDate,
+            entree: formatTime(entreeTs),
+            sortie: formatTime(sortieTs),
+            dureeDecimal: Math.round((diffMin / 60) * 100) / 100,
+            dureeFormatee: formatDuration(diffMin)
+          });
           saveToSheets(newDays);
         }
       };
@@ -449,7 +459,6 @@
             </div>
           </div>
 
-          {/* FAB Pointage */}
           {!selected && (
             <button className={`fab ${sessionTs ? "active" : "idle"}`} onClick={handlePointer}>
               <span className="fab-dot" />
@@ -457,7 +466,6 @@
             </button>
           )}
 
-          {/* Panneau saisie */}
           {selected && (
             <div style={{ position: "fixed", bottom: 0, left: 0, right: 0, background: "#141414", borderTop: "1px solid #2a2a2a", padding: "20px 16px 32px", zIndex: 100 }}>
               <div style={{ fontSize: "11px", color: "#555", letterSpacing: "0.1em", marginBottom: "2px" }}>
