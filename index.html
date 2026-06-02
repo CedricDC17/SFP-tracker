@@ -23,19 +23,20 @@
     .day-cell.filled { border-color: #2a2a2a; background: #161616; }
     .day-cell.today { border-color: #ff5c35 !important; }
     .day-cell.selected-cell { border-color: #ff5c35; background: #1f1208; }
-    .day-cell.empty-slot { opacity: 0; pointer-events: none; }
     .bar {
       position: absolute; bottom: 0; left: 0; width: 100%;
       background: linear-gradient(to top, #ff5c3540, transparent);
       transition: height 0.3s ease; pointer-events: none;
     }
-    .preset-btn {
-      background: #1e1e1e; border: 1px solid #2a2a2a; color: #e8e2d5;
-      padding: 10px 16px; border-radius: 4px; cursor: pointer;
-      font-family: 'DM Mono', monospace; font-size: 15px;
+    .adjust-btn {
+      flex: 1; border-radius: 4px; cursor: pointer;
+      font-family: 'DM Mono', monospace; font-size: 13px;
       -webkit-tap-highlight-color: transparent; min-height: 44px;
+      border: 1px solid #2a2a2a; background: #1a1a1a; color: #e8e2d5;
+      transition: background 0.1s;
     }
-    .preset-btn:active { background: #ff5c35; border-color: #ff5c35; color: #fff; }
+    .adjust-btn.plus:active { background: #1a2e1a; border-color: #3a6a3a; color: #6dba6d; }
+    .adjust-btn.minus:active { background: #2e1a1a; border-color: #6a3a3a; color: #ba6d6d; }
     .input-field {
       background: #1a1a1a; border: 1px solid #2a2a2a; color: #e8e2d5;
       padding: 12px 14px; border-radius: 6px; font-family: 'DM Mono', monospace;
@@ -85,7 +86,6 @@
     const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbwBi8tfsFQvfJfLoqLfUKh4ts5jPPacPGDRTcDDgZDyUbl7p-Wa03W9iP4al_KNflTz/exec";
     const OBJECTIF = 140;
 
-    // Nombre de jours dans le mois en cours
     const now = new Date();
     const DAYS_IN_MONTH = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
 
@@ -93,9 +93,24 @@
       jour: i + 1, date: null, heures: null, minutes: null
     }));
 
+    // Incréments : [heures, minutes]
+    const ADJUSTMENTS = [
+      { label: "5h",    h: 5,  m: 0  },
+      { label: "1h",    h: 1,  m: 0  },
+      { label: "30min", h: 0,  m: 30 },
+      { label: "10min", h: 0,  m: 10 },
+    ];
+
     function toDecimal(h, m) {
       if (h === null && m === null) return null;
       return (h || 0) + (m || 0) / 60;
+    }
+
+    function fromDecimal(decimal) {
+      if (decimal === null || decimal <= 0) return { h: null, m: null };
+      const h = Math.floor(decimal);
+      const m = Math.round((decimal - h) * 60);
+      return { h, m };
     }
 
     function formatDuration(decimal) {
@@ -144,23 +159,12 @@
       });
     }
 
-    const PRESETS = [
-      { label: "30min", h: 0, m: 30 },
-      { label: "1h", h: 1, m: 0 },
-      { label: "2h", h: 2, m: 0 },
-      { label: "3h", h: 3, m: 0 },
-      { label: "4h", h: 4, m: 0 },
-      { label: "5h", h: 5, m: 0 },
-      { label: "7h30", h: 7, m: 30 },
-    ];
-
     function App() {
       const [days, setDays] = useState(() => {
         try {
           const saved = localStorage.getItem("tracker-heures");
           if (saved) {
             const parsed = JSON.parse(saved);
-            // Vérifie que le cache correspond bien au mois en cours
             if (parsed.length === DAYS_IN_MONTH) return parsed;
           }
         } catch {}
@@ -172,7 +176,6 @@
       const [today] = useState(new Date().getDate());
       const [syncStatus, setSyncStatus] = useState("idle");
       const [syncMsg, setSyncMsg] = useState("Chargement…");
-      const [unsaved, setUnsaved] = useState(false);
 
       const loadFromSheets = useCallback(async () => {
         setSyncStatus("loading");
@@ -188,7 +191,7 @@
           localStorage.setItem("tracker-heures", JSON.stringify(newDays));
           setSyncStatus("ok");
           setSyncMsg("Synced ✓");
-        } catch (err) {
+        } catch {
           setSyncStatus("error");
           setSyncMsg("Hors ligne — données locales");
         }
@@ -196,20 +199,10 @@
 
       useEffect(() => { loadFromSheets(); }, []);
 
-      // Avertissement si on quitte avec des données non sauvegardées
-      useEffect(() => {
-        const handler = (e) => {
-          if (unsaved) { e.preventDefault(); e.returnValue = ""; }
-        };
-        window.addEventListener("beforeunload", handler);
-        return () => window.removeEventListener("beforeunload", handler);
-      }, [unsaved]);
-
       const saveToSheets = useCallback(async (newDays) => {
         localStorage.setItem("tracker-heures", JSON.stringify(newDays));
         setSyncStatus("saving");
         setSyncMsg("Sauvegarde…");
-        setUnsaved(false);
         try {
           const payload = newDays.map(d => ({
             jour: d.jour,
@@ -230,26 +223,29 @@
       }, []);
 
       const openDay = (jour) => {
-        if (unsaved) {
-          const ok = window.confirm("Saisie en cours non enregistrée. Continuer ?");
-          if (!ok) return;
-        }
         const d = days.find(d => d.jour === jour);
         setSelected(jour);
         setInputH(d.heures !== null ? String(d.heures) : "");
         setInputM(d.minutes !== null ? String(d.minutes) : "");
-        setUnsaved(false);
       };
 
-      const handleInput = (setter) => (e) => {
-        setter(e.target.value);
-        setUnsaved(true);
+      // +/- sur les inputs
+      const adjust = (deltaH, deltaM) => {
+        const currentDecimal = toDecimal(
+          inputH !== "" ? parseInt(inputH) || 0 : 0,
+          inputM !== "" ? parseInt(inputM) || 0 : 0
+        ) || 0;
+        const delta = deltaH + deltaM / 60;
+        const newDecimal = Math.max(0, currentDecimal + delta);
+        const { h, m } = fromDecimal(newDecimal === 0 ? null : newDecimal);
+        setInputH(h !== null ? String(h) : "0");
+        setInputM(m !== null ? String(m) : "0");
       };
 
       const save = () => {
         const h = inputH === "" ? null : parseInt(inputH, 10) || 0;
         const m = inputM === "" ? null : parseInt(inputM, 10) || 0;
-        const isEmpty = h === null && m === null;
+        const isEmpty = (h === null || h === 0) && (m === null || m === 0);
         const newDays = days.map(d =>
           d.jour === selected
             ? { ...d, heures: isEmpty ? null : h, minutes: isEmpty ? null : m }
@@ -257,7 +253,6 @@
         );
         setDays(newDays);
         setSelected(null);
-        setUnsaved(false);
         saveToSheets(newDays);
       };
 
@@ -267,17 +262,7 @@
         );
         setDays(newDays);
         setSelected(null);
-        setUnsaved(false);
         saveToSheets(newDays);
-      };
-
-      const cancel = () => {
-        if (unsaved) {
-          const ok = window.confirm("Annuler la saisie ?");
-          if (!ok) return;
-        }
-        setSelected(null);
-        setUnsaved(false);
       };
 
       const totalDecimal = days.reduce((acc, d) => {
@@ -289,13 +274,15 @@
       const reste = Math.max(0, OBJECTIF - totalDecimal);
       const pct = Math.min(100, Math.round((totalDecimal / OBJECTIF) * 100));
       const dotColor = { idle: "#444", loading: "#f39c12", saving: "#f39c12", ok: "#27ae60", error: "#e74c3c" }[syncStatus];
-
       const selectedDay = selected ? days.find(d => d.jour === selected) : null;
+      const previewDecimal = toDecimal(
+        inputH !== "" ? parseInt(inputH) : null,
+        inputM !== "" ? parseInt(inputM) : null
+      );
 
       return (
         <div style={{ fontFamily: "'DM Mono', monospace", minHeight: "100vh", background: "#0f0f0f", color: "#e8e2d5" }}>
 
-          {/* Barre sync */}
           <div className="sync-bar">
             <div className="sync-dot" style={{ background: dotColor }} />
             <span>{syncMsg}</span>
@@ -304,7 +291,6 @@
             </button>
           </div>
 
-          {/* Header */}
           <div style={{ padding: "20px 16px 16px", borderBottom: "1px solid #1e1e1e" }}>
             <div style={{ fontFamily: "'Syne', sans-serif", fontSize: "22px", fontWeight: 800, letterSpacing: "-0.02em", color: "#fff" }}>
               TRACKER HEURES SFP
@@ -333,7 +319,6 @@
             </div>
           </div>
 
-          {/* Grille */}
           <div style={{ padding: "16px" }}>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: "5px" }}>
               {days.map(d => {
@@ -342,7 +327,6 @@
                 const isFilled = decimal !== null;
                 const isToday = d.jour === today;
                 const isSelected = d.jour === selected;
-                // Étiquette courte : "Lu 2" etc.
                 const shortDate = d.date
                   ? d.date.split(" ").slice(0, 2).join(" ")
                   : `J${d.jour}`;
@@ -366,49 +350,55 @@
             </div>
           </div>
 
-          {/* Panneau de saisie */}
           {selected && (
-            <div style={{ position: "fixed", bottom: 0, left: 0, right: 0, background: "#141414", borderTop: "1px solid #2a2a2a", padding: "20px 16px 32px", zIndex: 100 }}>
-              <div style={{ fontSize: "11px", color: "#555", letterSpacing: "0.1em", marginBottom: "4px" }}>
+            <div style={{ position: "fixed", bottom: 0, left: 0, right: 0, background: "#141414", borderTop: "1px solid #2a2a2a", padding: "16px 16px 28px", zIndex: 100 }}>
+
+              {/* Titre */}
+              <div style={{ fontSize: "11px", color: "#555", letterSpacing: "0.1em", marginBottom: "2px" }}>
                 JOUR {selected} — SAISIR LES HEURES
               </div>
               {selectedDay?.date && (
-                <div style={{ fontSize: "13px", color: "#888", marginBottom: "16px" }}>
+                <div style={{ fontSize: "13px", color: "#666", marginBottom: "14px" }}>
                   {selectedDay.date}
                 </div>
               )}
-              <div style={{ display: "flex", gap: "6px", marginBottom: "18px", flexWrap: "wrap" }}>
-                {PRESETS.map(p => (
-                  <button key={p.label} className="preset-btn"
-                    onClick={() => { setInputH(String(p.h)); setInputM(String(p.m)); setUnsaved(true); }}>
-                    {p.label}
-                  </button>
+
+              {/* Boutons +/- */}
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: "6px", marginBottom: "14px" }}>
+                {ADJUSTMENTS.map(a => (
+                  <div key={a.label} style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
+                    <button className="adjust-btn plus" onClick={() => adjust(a.h, a.m)}>
+                      +{a.label}
+                    </button>
+                    <button className="adjust-btn minus" onClick={() => adjust(-a.h, -a.m)}>
+                      -{a.label}
+                    </button>
+                  </div>
                 ))}
               </div>
-              <div style={{ display: "flex", alignItems: "center", gap: "12px", marginBottom: "18px" }}>
+
+              {/* Inputs manuels */}
+              <div style={{ display: "flex", alignItems: "center", gap: "12px", marginBottom: "14px" }}>
                 <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
                   <input className="input-field" type="number" min="0" max="24"
-                    placeholder="0" value={inputH} onChange={handleInput(setInputH)} />
+                    placeholder="0" value={inputH} onChange={e => setInputH(e.target.value)} />
                   <span style={{ color: "#555", fontSize: "16px" }}>h</span>
                 </div>
                 <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
                   <input className="input-field" type="number" min="0" max="59"
-                    placeholder="0" value={inputM} onChange={handleInput(setInputM)} />
+                    placeholder="0" value={inputM} onChange={e => setInputM(e.target.value)} />
                   <span style={{ color: "#555", fontSize: "16px" }}>min</span>
                 </div>
-                <div style={{ color: "#ff5c35", fontSize: "20px", fontWeight: 500, minWidth: "50px" }}>
-                  {(inputH || inputM)
-                    ? formatDuration(toDecimal(
-                        inputH !== "" ? parseInt(inputH) : null,
-                        inputM !== "" ? parseInt(inputM) : null
-                      ))
-                    : ""}
+                <div style={{ color: "#ff5c35", fontSize: "20px", fontWeight: 500, minWidth: "60px" }}>
+                  {previewDecimal ? formatDuration(previewDecimal) : ""}
                 </div>
               </div>
+
+              {/* Actions */}
               <div style={{ display: "flex", gap: "8px" }}>
                 <button className="btn-save" onClick={save}>ENREGISTRER</button>
                 <button className="btn-clear" onClick={clearDay}>Effacer</button>
-                <button className="btn-clear" onClick={cancel} style={{ marginLeft: "auto" }}>✕</button>
+                <button className="btn-clear" onClick={() => setSelected(null)} style={{ marginLeft: "auto" }}>✕</button>
               </div>
             </div>
           )}
