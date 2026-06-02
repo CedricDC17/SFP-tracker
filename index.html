@@ -78,6 +78,21 @@
       -webkit-tap-highlight-color: transparent;
     }
     .sync-btn:active { border-color: #ff5c35; color: #ff5c35; }
+    .fab {
+      position: fixed; bottom: 24px; right: 16px;
+      border-radius: 50px; border: none; cursor: pointer;
+      font-family: 'DM Mono', monospace; font-size: 12px; font-weight: 500;
+      padding: 12px 18px; z-index: 99;
+      display: flex; align-items: center; gap: 8px;
+      box-shadow: 0 4px 20px #00000080;
+      -webkit-tap-highlight-color: transparent;
+      transition: all 0.2s ease;
+    }
+    .fab.idle { background: #1e1e1e; border: 1px solid #2a2a2a; color: #888; }
+    .fab.active { background: #ff5c35; color: #fff; border: none; }
+    .fab-dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex-shrink: 0; }
+    @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+    .fab.active .fab-dot { animation: pulse 2s ease-in-out infinite; }
     @keyframes spin { to { transform: rotate(360deg); } }
     .spinning { animation: spin 1s linear infinite; display: inline-block; }
   </style>
@@ -85,10 +100,12 @@
 <body>
   <div id="root"></div>
   <script type="text/babel">
-    const { useState, useEffect, useCallback } = React;
+    const { useState, useEffect, useCallback, useRef } = React;
 
-    const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbwBi8tfsFQvfJfLoqLfUKh4ts5jPPacPGDRTcDDgZDyUbl7p-Wa03W9iP4al_KNflTz/exec";
+    const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbzw04WYRGusckxzndtIN7a9eXZGqGV_wmMyrerrNdlgOSafed936R4BunAi2BAK9YB8/exec";
     const OBJECTIF = 140;
+    const LS_HEURES = "tracker-heures";
+    const LS_SESSION = "tracker-session";
 
     const now = new Date();
     const DAYS_IN_MONTH = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
@@ -97,16 +114,16 @@
       jour: i + 1, date: null, heures: null, minutes: null
     }));
 
+    const STEPS = [
+      { label: "5h",    min: 300 },
+      { label: "1h",    min: 60  },
+      { label: "30min", min: 30  },
+      { label: "10min", min: 10  },
+    ];
+
     function toDecimal(h, m) {
       if (h === null && m === null) return null;
       return (h || 0) + (m || 0) / 60;
-    }
-
-    function fromDecimal(decimal) {
-      if (decimal === null || decimal <= 0) return { h: 0, m: 0 };
-      const h = Math.floor(decimal);
-      const m = Math.round((decimal - h) * 60);
-      return { h, m };
     }
 
     function toTotalMin(h, m) {
@@ -129,6 +146,11 @@
       if (h === 0) return `${m}min`;
       if (m === 0) return `${h}h`;
       return `${h}h${String(m).padStart(2, "0")}`;
+    }
+
+    function formatTime(ts) {
+      const d = new Date(ts);
+      return `${String(d.getHours()).padStart(2,"0")}:${String(d.getMinutes()).padStart(2,"0")}`;
     }
 
     function parseHeures(val) {
@@ -168,17 +190,19 @@
       });
     }
 
-    const STEPS = [
-      { label: "5h",    min: 300 },
-      { label: "1h",    min: 60  },
-      { label: "30min", min: 30  },
-      { label: "10min", min: 10  },
-    ];
+    async function postToSheets(body) {
+      await fetch(SCRIPT_URL, {
+        method: "POST",
+        mode: "no-cors",
+        body: JSON.stringify(body),
+        headers: { "Content-Type": "text/plain" }
+      });
+    }
 
     function App() {
       const [days, setDays] = useState(() => {
         try {
-          const saved = localStorage.getItem("tracker-heures");
+          const saved = localStorage.getItem(LS_HEURES);
           if (saved) {
             const parsed = JSON.parse(saved);
             if (parsed.length === DAYS_IN_MONTH) return parsed;
@@ -186,11 +210,48 @@
         } catch {}
         return EMPTY_DATA;
       });
+
       const [selected, setSelected] = useState(null);
       const [counterMin, setCounterMin] = useState(0);
       const [today] = useState(new Date().getDate());
       const [syncStatus, setSyncStatus] = useState("idle");
       const [syncMsg, setSyncMsg] = useState("Chargement…");
+
+      // Session pointage
+      const [sessionTs, setSessionTs] = useState(() => {
+        try { return localStorage.getItem(LS_SESSION) || null; } catch { return null; }
+      });
+      const [chronoDisplay, setChronoDisplay] = useState("");
+      const chronoRef = useRef(null);
+
+      // Chrono live
+      useEffect(() => {
+        if (!sessionTs) { setChronoDisplay(""); return; }
+        const update = () => {
+          const diff = Date.now() - parseInt(sessionTs);
+          const h = Math.floor(diff / 3600000);
+          const m = Math.floor((diff % 3600000) / 60000);
+          setChronoDisplay(`${formatTime(parseInt(sessionTs))} · ${h > 0 ? h+"h" : ""}${String(m).padStart(2,"0")}min`);
+        };
+        update();
+        chronoRef.current = setInterval(update, 30000);
+        return () => clearInterval(chronoRef.current);
+      }, [sessionTs]);
+
+      // Reset à minuit
+      useEffect(() => {
+        const checkMidnight = () => {
+          const n = new Date();
+          if (n.getHours() === 0 && n.getMinutes() === 0 && sessionTs) {
+            alert("Session de pointage en cours resetée — pense à pointer demain !");
+            localStorage.removeItem(LS_SESSION);
+            setSessionTs(null);
+            postToSheets({ type: "session_end_midnight" });
+          }
+        };
+        const interval = setInterval(checkMidnight, 60000);
+        return () => clearInterval(interval);
+      }, [sessionTs]);
 
       const loadFromSheets = useCallback(async () => {
         setSyncStatus("loading");
@@ -203,7 +264,12 @@
             return { jour: i + 1, date: row.date || null, heures: h, minutes: m };
           });
           setDays(newDays);
-          localStorage.setItem("tracker-heures", JSON.stringify(newDays));
+          localStorage.setItem(LS_HEURES, JSON.stringify(newDays));
+          // Récupère session depuis Sheet si localStorage vide
+          if (!localStorage.getItem(LS_SESSION) && json.session) {
+            localStorage.setItem(LS_SESSION, json.session);
+            setSessionTs(json.session);
+          }
           setSyncStatus("ok");
           setSyncMsg("Synced ✓");
         } catch {
@@ -215,19 +281,13 @@
       useEffect(() => { loadFromSheets(); }, []);
 
       const saveToSheets = useCallback(async (newDays) => {
-        localStorage.setItem("tracker-heures", JSON.stringify(newDays));
+        localStorage.setItem(LS_HEURES, JSON.stringify(newDays));
         setSyncStatus("saving");
         setSyncMsg("Sauvegarde…");
         try {
-          const payload = newDays.map(d => ({
-            jour: d.jour,
-            heures: toDecimal(d.heures, d.minutes)
-          }));
-          await fetch(SCRIPT_URL, {
-            method: "POST",
-            mode: "no-cors",
-            body: JSON.stringify(payload),
-            headers: { "Content-Type": "text/plain" }
+          await postToSheets({
+            type: "heures",
+            data: newDays.map(d => ({ jour: d.jour, heures: toDecimal(d.heures, d.minutes) }))
           });
           setSyncStatus("ok");
           setSyncMsg("Sauvegardé ✓");
@@ -237,17 +297,55 @@
         }
       }, []);
 
+      const handlePointer = async () => {
+        if (!sessionTs) {
+          // Entrée
+          const ts = Date.now().toString();
+          localStorage.setItem(LS_SESSION, ts);
+          setSessionTs(ts);
+          try { await postToSheets({ type: "session_start", timestamp: ts }); } catch {}
+        } else {
+          // Sortie
+          const entreeTs = parseInt(sessionTs);
+          const sortieTs = Date.now();
+          const diffMin = Math.round((sortieTs - entreeTs) / 60000);
+          const todayDay = new Date().getDate();
+          const todayDate = new Date().toLocaleDateString("fr-FR", { weekday: "long", day: "numeric", month: "long" });
+
+          // Ajoute au jour en cours
+          const newDays = days.map(d => {
+            if (d.jour !== todayDay) return d;
+            const existingMin = toTotalMin(d.heures, d.minutes);
+            const totalMin = existingMin + diffMin;
+            return { ...d, heures: Math.floor(totalMin / 60), minutes: totalMin % 60 };
+          });
+          setDays(newDays);
+          localStorage.removeItem(LS_SESSION);
+          setSessionTs(null);
+
+          // Log + sync
+          const dureeDecimal = diffMin / 60;
+          const dureeFormatee = formatDuration(diffMin);
+          try {
+            await postToSheets({ type: "session_end",
+              date: todayDate,
+              entree: formatTime(entreeTs),
+              sortie: formatTime(sortieTs),
+              dureeDecimal: Math.round(dureeDecimal * 100) / 100,
+              dureeFormatee
+            });
+          } catch {}
+          saveToSheets(newDays);
+        }
+      };
+
       const openDay = (jour) => {
         const d = days.find(d => d.jour === jour);
         setSelected(jour);
-        // Pré-remplit avec les heures existantes
-        const existing = toTotalMin(d.heures, d.minutes);
-        setCounterMin(existing);
+        setCounterMin(toTotalMin(d.heures, d.minutes));
       };
 
-      const adjust = (delta) => {
-        setCounterMin(prev => Math.max(0, prev + delta));
-      };
+      const adjust = (delta) => setCounterMin(prev => Math.max(0, prev + delta));
 
       const save = () => {
         const h = Math.floor(counterMin / 60);
@@ -284,7 +382,7 @@
       const selectedDay = selected ? days.find(d => d.jour === selected) : null;
 
       return (
-        <div style={{ fontFamily: "'DM Mono', monospace", minHeight: "100vh", background: "#0f0f0f", color: "#e8e2d5" }}>
+        <div style={{ fontFamily: "'DM Mono', monospace", minHeight: "100vh", background: "#0f0f0f", color: "#e8e2d5", paddingBottom: "80px" }}>
 
           <div className="sync-bar">
             <div className="sync-dot" style={{ background: dotColor }} />
@@ -330,9 +428,7 @@
                 const isFilled = decimal !== null;
                 const isToday = d.jour === today;
                 const isSelected = d.jour === selected;
-                const shortDate = d.date
-                  ? d.date.split(" ").slice(0, 2).join(" ")
-                  : `J${d.jour}`;
+                const shortDate = d.date ? d.date.split(" ").slice(0, 2).join(" ") : `J${d.jour}`;
                 return (
                   <div key={d.jour}
                     className={`day-cell${isFilled ? " filled" : ""}${isToday ? " today" : ""}${isSelected ? " selected-cell" : ""}`}
@@ -353,9 +449,17 @@
             </div>
           </div>
 
+          {/* FAB Pointage */}
+          {!selected && (
+            <button className={`fab ${sessionTs ? "active" : "idle"}`} onClick={handlePointer}>
+              <span className="fab-dot" />
+              {sessionTs ? chronoDisplay || "En cours…" : "POINTER L'ENTRÉE"}
+            </button>
+          )}
+
+          {/* Panneau saisie */}
           {selected && (
             <div style={{ position: "fixed", bottom: 0, left: 0, right: 0, background: "#141414", borderTop: "1px solid #2a2a2a", padding: "20px 16px 32px", zIndex: 100 }}>
-
               <div style={{ fontSize: "11px", color: "#555", letterSpacing: "0.1em", marginBottom: "2px" }}>
                 JOUR {selected} — SAISIR LES HEURES
               </div>
@@ -364,17 +468,9 @@
                   {selectedDay.date}
                 </div>
               )}
-
-              {/* Counter central */}
-              <div style={{
-                fontSize: "64px", fontWeight: 500, textAlign: "center",
-                color: counterMin > 0 ? "#ff5c35" : "#2a2a2a",
-                letterSpacing: "-0.03em", lineHeight: 1, marginBottom: "24px"
-              }}>
+              <div style={{ fontSize: "64px", fontWeight: 500, textAlign: "center", color: counterMin > 0 ? "#ff5c35" : "#2a2a2a", letterSpacing: "-0.03em", lineHeight: 1, marginBottom: "24px" }}>
                 {formatDuration(counterMin)}
               </div>
-
-              {/* Steppers 2x2 */}
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px", maxWidth: "320px", margin: "0 auto 24px" }}>
                 {STEPS.map(s => (
                   <div key={s.label} className="s-row">
@@ -384,8 +480,6 @@
                   </div>
                 ))}
               </div>
-
-              {/* Actions */}
               <div style={{ display: "flex", gap: "8px", maxWidth: "320px", margin: "0 auto" }}>
                 <button className="btn-save" onClick={save}>ENREGISTRER</button>
                 <button className="btn-clear" onClick={clearDay}>Effacer</button>
