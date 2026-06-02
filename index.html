@@ -23,6 +23,7 @@
     .day-cell.filled { border-color: #2a2a2a; background: #161616; }
     .day-cell.today { border-color: #ff5c35 !important; }
     .day-cell.selected-cell { border-color: #ff5c35; background: #1f1208; }
+    .day-cell.empty-slot { opacity: 0; pointer-events: none; }
     .bar {
       position: absolute; bottom: 0; left: 0; width: 100%;
       background: linear-gradient(to top, #ff5c3540, transparent);
@@ -81,11 +82,15 @@
   <script type="text/babel">
     const { useState, useEffect, useCallback } = React;
 
-    const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbyt2slIWyBxnoCNhhRQ9W_uXHd9O98DhOqBUyiLdw0ZlgscarRSO5pFXNEbyOa_OfHX/exec";
+    const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbyVVwSbXNtkCdJXCPyLzxcErJ0bTo2iN9rKKMWpfmw3wVWD4MVjcO0fDwFeIZIuokwj/exec";
     const OBJECTIF = 140;
 
-    const EMPTY_DATA = Array.from({ length: 31 }, (_, i) => ({
-      jour: i + 1, heures: null, minutes: null
+    // Nombre de jours dans le mois en cours
+    const now = new Date();
+    const DAYS_IN_MONTH = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
+
+    const EMPTY_DATA = Array.from({ length: DAYS_IN_MONTH }, (_, i) => ({
+      jour: i + 1, date: null, heures: null, minutes: null
     }));
 
     function toDecimal(h, m) {
@@ -103,7 +108,7 @@
     }
 
     function parseHeures(val) {
-      if (!val && val !== 0) return { h: null, m: null };
+      if (val === null || val === "" || val === undefined) return { h: null, m: null };
       if (typeof val === "number") {
         const h = Math.floor(val);
         const m = Math.round((val - h) * 60);
@@ -113,25 +118,24 @@
         const match = val.match(/^(\d+):(\d+)/);
         if (match) return { h: parseInt(match[1]), m: parseInt(match[2]) };
         const n = parseFloat(val);
-        if (!isNaN(n)) { const h = Math.floor(n); return { h, m: Math.round((n-h)*60) }; }
+        if (!isNaN(n)) { const h = Math.floor(n); return { h, m: Math.round((n - h) * 60) }; }
       }
       return { h: null, m: null };
     }
 
-    // JSONP loader — contourne le CORS pour les GET
     function jsonpFetch(url) {
       return new Promise((resolve, reject) => {
         const cbName = "cb_" + Date.now();
         const script = document.createElement("script");
         const timeout = setTimeout(() => {
           delete window[cbName];
-          document.body.removeChild(script);
+          if (document.body.contains(script)) document.body.removeChild(script);
           reject(new Error("timeout"));
         }, 10000);
         window[cbName] = (data) => {
           clearTimeout(timeout);
           delete window[cbName];
-          document.body.removeChild(script);
+          if (document.body.contains(script)) document.body.removeChild(script);
           resolve(data);
         };
         script.src = `${url}?callback=${cbName}`;
@@ -141,9 +145,12 @@
     }
 
     const PRESETS = [
-      { label: "1h", h: 1, m: 0 }, { label: "2h", h: 2, m: 0 },
-      { label: "3h", h: 3, m: 0 }, { label: "4h", h: 4, m: 0 },
-      { label: "5h", h: 5, m: 0 }, { label: "7h", h: 7, m: 0 },
+      { label: "30min", h: 0, m: 30 },
+      { label: "1h", h: 1, m: 0 },
+      { label: "2h", h: 2, m: 0 },
+      { label: "3h", h: 3, m: 0 },
+      { label: "4h", h: 4, m: 0 },
+      { label: "5h", h: 5, m: 0 },
       { label: "7h30", h: 7, m: 30 },
     ];
 
@@ -151,8 +158,13 @@
       const [days, setDays] = useState(() => {
         try {
           const saved = localStorage.getItem("tracker-heures");
-          return saved ? JSON.parse(saved) : EMPTY_DATA;
-        } catch { return EMPTY_DATA; }
+          if (saved) {
+            const parsed = JSON.parse(saved);
+            // Vérifie que le cache correspond bien au mois en cours
+            if (parsed.length === DAYS_IN_MONTH) return parsed;
+          }
+        } catch {}
+        return EMPTY_DATA;
       });
       const [selected, setSelected] = useState(null);
       const [inputH, setInputH] = useState("");
@@ -160,23 +172,23 @@
       const [today] = useState(new Date().getDate());
       const [syncStatus, setSyncStatus] = useState("idle");
       const [syncMsg, setSyncMsg] = useState("Chargement…");
+      const [unsaved, setUnsaved] = useState(false);
 
       const loadFromSheets = useCallback(async () => {
         setSyncStatus("loading");
         setSyncMsg("Chargement…");
         try {
           const json = await jsonpFetch(SCRIPT_URL);
-          const newDays = EMPTY_DATA.map((d, i) => {
-            const row = json[i];
-            if (!row) return d;
+          if (!json.ok) throw new Error(json.error || "Erreur serveur");
+          const newDays = json.data.slice(0, DAYS_IN_MONTH).map((row, i) => {
             const { h, m } = parseHeures(row.heures);
-            return { jour: d.jour, heures: h, minutes: m };
+            return { jour: i + 1, date: row.date || null, heures: h, minutes: m };
           });
           setDays(newDays);
           localStorage.setItem("tracker-heures", JSON.stringify(newDays));
           setSyncStatus("ok");
           setSyncMsg("Synced ✓");
-        } catch {
+        } catch (err) {
           setSyncStatus("error");
           setSyncMsg("Hors ligne — données locales");
         }
@@ -184,16 +196,25 @@
 
       useEffect(() => { loadFromSheets(); }, []);
 
+      // Avertissement si on quitte avec des données non sauvegardées
+      useEffect(() => {
+        const handler = (e) => {
+          if (unsaved) { e.preventDefault(); e.returnValue = ""; }
+        };
+        window.addEventListener("beforeunload", handler);
+        return () => window.removeEventListener("beforeunload", handler);
+      }, [unsaved]);
+
       const saveToSheets = useCallback(async (newDays) => {
         localStorage.setItem("tracker-heures", JSON.stringify(newDays));
         setSyncStatus("saving");
         setSyncMsg("Sauvegarde…");
+        setUnsaved(false);
         try {
           const payload = newDays.map(d => ({
             jour: d.jour,
             heures: toDecimal(d.heures, d.minutes)
           }));
-          // no-cors pour le POST (on peut pas lire la réponse mais ça s'envoie)
           await fetch(SCRIPT_URL, {
             method: "POST",
             mode: "no-cors",
@@ -209,10 +230,20 @@
       }, []);
 
       const openDay = (jour) => {
+        if (unsaved) {
+          const ok = window.confirm("Saisie en cours non enregistrée. Continuer ?");
+          if (!ok) return;
+        }
         const d = days.find(d => d.jour === jour);
         setSelected(jour);
         setInputH(d.heures !== null ? String(d.heures) : "");
         setInputM(d.minutes !== null ? String(d.minutes) : "");
+        setUnsaved(false);
+      };
+
+      const handleInput = (setter) => (e) => {
+        setter(e.target.value);
+        setUnsaved(true);
       };
 
       const save = () => {
@@ -226,6 +257,7 @@
         );
         setDays(newDays);
         setSelected(null);
+        setUnsaved(false);
         saveToSheets(newDays);
       };
 
@@ -235,7 +267,17 @@
         );
         setDays(newDays);
         setSelected(null);
+        setUnsaved(false);
         saveToSheets(newDays);
+      };
+
+      const cancel = () => {
+        if (unsaved) {
+          const ok = window.confirm("Annuler la saisie ?");
+          if (!ok) return;
+        }
+        setSelected(null);
+        setUnsaved(false);
       };
 
       const totalDecimal = days.reduce((acc, d) => {
@@ -243,15 +285,17 @@
         return val !== null ? acc + val : acc;
       }, 0);
 
-      const filledDays = days.filter(d => toDecimal(d.heures, d.minutes) !== null).length;
       const maxVal = Math.max(...days.map(d => toDecimal(d.heures, d.minutes) ?? 0), 1);
       const reste = Math.max(0, OBJECTIF - totalDecimal);
       const pct = Math.min(100, Math.round((totalDecimal / OBJECTIF) * 100));
       const dotColor = { idle: "#444", loading: "#f39c12", saving: "#f39c12", ok: "#27ae60", error: "#e74c3c" }[syncStatus];
 
+      const selectedDay = selected ? days.find(d => d.jour === selected) : null;
+
       return (
         <div style={{ fontFamily: "'DM Mono', monospace", minHeight: "100vh", background: "#0f0f0f", color: "#e8e2d5" }}>
 
+          {/* Barre sync */}
           <div className="sync-bar">
             <div className="sync-dot" style={{ background: dotColor }} />
             <span>{syncMsg}</span>
@@ -260,6 +304,7 @@
             </button>
           </div>
 
+          {/* Header */}
           <div style={{ padding: "20px 16px 16px", borderBottom: "1px solid #1e1e1e" }}>
             <div style={{ fontFamily: "'Syne', sans-serif", fontSize: "22px", fontWeight: 800, letterSpacing: "-0.02em", color: "#fff" }}>
               TRACKER HEURES SFP
@@ -288,6 +333,7 @@
             </div>
           </div>
 
+          {/* Grille */}
           <div style={{ padding: "16px" }}>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: "5px" }}>
               {days.map(d => {
@@ -296,15 +342,19 @@
                 const isFilled = decimal !== null;
                 const isToday = d.jour === today;
                 const isSelected = d.jour === selected;
+                // Étiquette courte : "Lu 2" etc.
+                const shortDate = d.date
+                  ? d.date.split(" ").slice(0, 2).join(" ")
+                  : `J${d.jour}`;
                 return (
                   <div key={d.jour}
-                    className={`day-cell${isFilled?" filled":""}${isToday?" today":""}${isSelected?" selected-cell":""}`}
+                    className={`day-cell${isFilled ? " filled" : ""}${isToday ? " today" : ""}${isSelected ? " selected-cell" : ""}`}
                     onClick={() => openDay(d.jour)}
                   >
                     <div className="bar" style={{ height: `${barHeight}%` }} />
                     <div style={{ position: "relative", zIndex: 1 }}>
                       <div style={{ fontSize: "9px", color: isToday ? "#ff5c35" : "#444", marginBottom: "3px" }}>
-                        J{d.jour}{isToday ? "●" : ""}
+                        {shortDate}{isToday ? "●" : ""}
                       </div>
                       <div style={{ fontSize: isFilled ? "12px" : "10px", fontWeight: isFilled ? 500 : 400, color: isFilled ? "#e8e2d5" : "#2a2a2a" }}>
                         {formatDuration(decimal)}
@@ -316,35 +366,49 @@
             </div>
           </div>
 
+          {/* Panneau de saisie */}
           {selected && (
             <div style={{ position: "fixed", bottom: 0, left: 0, right: 0, background: "#141414", borderTop: "1px solid #2a2a2a", padding: "20px 16px 32px", zIndex: 100 }}>
-              <div style={{ fontSize: "11px", color: "#555", letterSpacing: "0.1em", marginBottom: "16px" }}>
+              <div style={{ fontSize: "11px", color: "#555", letterSpacing: "0.1em", marginBottom: "4px" }}>
                 JOUR {selected} — SAISIR LES HEURES
               </div>
+              {selectedDay?.date && (
+                <div style={{ fontSize: "13px", color: "#888", marginBottom: "16px" }}>
+                  {selectedDay.date}
+                </div>
+              )}
               <div style={{ display: "flex", gap: "6px", marginBottom: "18px", flexWrap: "wrap" }}>
                 {PRESETS.map(p => (
-                  <button key={p.label} className="preset-btn" onClick={() => { setInputH(String(p.h)); setInputM(String(p.m)); }}>
+                  <button key={p.label} className="preset-btn"
+                    onClick={() => { setInputH(String(p.h)); setInputM(String(p.m)); setUnsaved(true); }}>
                     {p.label}
                   </button>
                 ))}
               </div>
               <div style={{ display: "flex", alignItems: "center", gap: "12px", marginBottom: "18px" }}>
                 <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
-                  <input className="input-field" type="number" min="0" max="24" placeholder="0" value={inputH} onChange={e => setInputH(e.target.value)} />
+                  <input className="input-field" type="number" min="0" max="24"
+                    placeholder="0" value={inputH} onChange={handleInput(setInputH)} />
                   <span style={{ color: "#555", fontSize: "16px" }}>h</span>
                 </div>
                 <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
-                  <input className="input-field" type="number" min="0" max="59" placeholder="0" value={inputM} onChange={e => setInputM(e.target.value)} />
+                  <input className="input-field" type="number" min="0" max="59"
+                    placeholder="0" value={inputM} onChange={handleInput(setInputM)} />
                   <span style={{ color: "#555", fontSize: "16px" }}>min</span>
                 </div>
                 <div style={{ color: "#ff5c35", fontSize: "20px", fontWeight: 500, minWidth: "50px" }}>
-                  {(inputH || inputM) ? formatDuration(toDecimal(inputH !== "" ? parseInt(inputH) : null, inputM !== "" ? parseInt(inputM) : null)) : ""}
+                  {(inputH || inputM)
+                    ? formatDuration(toDecimal(
+                        inputH !== "" ? parseInt(inputH) : null,
+                        inputM !== "" ? parseInt(inputM) : null
+                      ))
+                    : ""}
                 </div>
               </div>
               <div style={{ display: "flex", gap: "8px" }}>
                 <button className="btn-save" onClick={save}>ENREGISTRER</button>
                 <button className="btn-clear" onClick={clearDay}>Effacer</button>
-                <button className="btn-clear" onClick={() => setSelected(null)} style={{ marginLeft: "auto" }}>✕</button>
+                <button className="btn-clear" onClick={cancel} style={{ marginLeft: "auto" }}>✕</button>
               </div>
             </div>
           )}
