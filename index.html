@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Tracker SFP" />
+  <title>Tracker Heures SFP</title>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@300;400;500&family=Syne:wght@700;800&display=swap" rel="stylesheet" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { background: #0f0f0f; height: 100%; }
+    .day-cell {
+      cursor: pointer; border: 1px solid #1e1e1e; border-radius: 6px;
+      padding: 8px 6px; transition: all 0.15s ease; position: relative;
+      overflow: hidden; background: #141414; -webkit-tap-highlight-color: transparent;
+    }
+    .day-cell.filled { border-color: #2a2a2a; background: #161616; }
+    .day-cell.today { border-color: #ff5c35 !important; }
+    .day-cell.selected-cell { border-color: #ff5c35; background: #1f1208; }
+    .bar {
+      position: absolute; bottom: 0; left: 0; width: 100%;
+      background: linear-gradient(to top, #ff5c3540, transparent);
+      transition: height 0.3s ease; pointer-events: none;
+    }
+    .preset-btn {
+      background: #1e1e1e; border: 1px solid #2a2a2a; color: #e8e2d5;
+      padding: 10px 16px; border-radius: 4px; cursor: pointer;
+      font-family: 'DM Mono', monospace; font-size: 15px;
+      -webkit-tap-highlight-color: transparent; min-height: 44px;
+    }
+    .preset-btn:active { background: #ff5c35; border-color: #ff5c35; color: #fff; }
+    .input-field {
+      background: #1a1a1a; border: 1px solid #2a2a2a; color: #e8e2d5;
+      padding: 12px 14px; border-radius: 6px; font-family: 'DM Mono', monospace;
+      font-size: 20px; width: 80px; text-align: center; outline: none;
+    }
+    .input-field:focus { border-color: #ff5c35; }
+    .btn-save {
+      background: #ff5c35; border: none; color: #fff; padding: 14px 28px;
+      border-radius: 6px; cursor: pointer; font-family: 'DM Mono', monospace;
+      font-size: 15px; font-weight: 500; min-height: 48px;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .btn-save:active { background: #ff7a55; }
+    .btn-clear {
+      background: transparent; border: 1px solid #333; color: #888;
+      padding: 14px 18px; border-radius: 6px; cursor: pointer;
+      font-family: 'DM Mono', monospace; font-size: 14px; min-height: 48px;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .btn-clear:active { border-color: #ff5c35; color: #ff5c35; }
+    .stat-card {
+      background: #141414; border: 1px solid #1e1e1e;
+      border-radius: 8px; padding: 14px 16px; flex: 1;
+    }
+    .sync-bar {
+      display: flex; align-items: center; gap: 8px;
+      padding: 8px 16px; background: #111; border-bottom: 1px solid #1a1a1a;
+      font-size: 11px; color: #555; font-family: 'DM Mono', monospace;
+    }
+    .sync-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+    .sync-btn {
+      margin-left: auto; background: transparent; border: 1px solid #2a2a2a;
+      color: #666; padding: 4px 10px; border-radius: 4px; cursor: pointer;
+      font-family: 'DM Mono', monospace; font-size: 11px;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .sync-btn:active { border-color: #ff5c35; color: #ff5c35; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .spinning { animation: spin 1s linear infinite; display: inline-block; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useState, useEffect, useCallback } = React;
+
+    const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbw6f-JmpfB33mMR1c97m--6rWpP7Gxn07a7zklU_ubumDq1Jj1teRkvsHZrKKhQOvzO/exec";
+    const OBJECTIF = 140;
+
+    const EMPTY_DATA = Array.from({ length: 31 }, (_, i) => ({
+      jour: i + 1, heures: null, minutes: null
+    }));
+
+    function toDecimal(h, m) {
+      if (h === null && m === null) return null;
+      return (h || 0) + (m || 0) / 60;
+    }
+
+    function formatDuration(decimal) {
+      if (decimal === null || decimal === 0) return "—";
+      const h = Math.floor(decimal);
+      const m = Math.round((decimal - h) * 60);
+      if (h === 0) return `${m}min`;
+      if (m === 0) return `${h}h`;
+      return `${h}h${String(m).padStart(2, "0")}`;
+    }
+
+    // Parse heures from sheets value (e.g. 6, 0.5, "6:00:00", etc.)
+    function parseHeures(val) {
+      if (!val && val !== 0) return { h: null, m: null };
+      if (typeof val === "number") {
+        const h = Math.floor(val);
+        const m = Math.round((val - h) * 60);
+        return { h, m };
+      }
+      if (typeof val === "string") {
+        const match = val.match(/^(\d+):(\d+)/);
+        if (match) return { h: parseInt(match[1]), m: parseInt(match[2]) };
+        const n = parseFloat(val);
+        if (!isNaN(n)) {
+          const h = Math.floor(n);
+          const m = Math.round((n - h) * 60);
+          return { h, m };
+        }
+      }
+      return { h: null, m: null };
+    }
+
+    const PRESETS = [
+      { label: "1h", h: 1, m: 0 }, { label: "2h", h: 2, m: 0 },
+      { label: "3h", h: 3, m: 0 }, { label: "4h", h: 4, m: 0 },
+      { label: "5h", h: 5, m: 0 }, { label: "7h", h: 7, m: 0 },
+      { label: "7h30", h: 7, m: 30 },
+    ];
+
+    function App() {
+      const [days, setDays] = useState(EMPTY_DATA);
+      const [selected, setSelected] = useState(null);
+      const [inputH, setInputH] = useState("");
+      const [inputM, setInputM] = useState("");
+      const [today] = useState(new Date().getDate());
+      const [syncStatus, setSyncStatus] = useState("idle"); // idle | loading | saving | ok | error
+      const [syncMsg, setSyncMsg] = useState("Non synchronisé");
+
+      // Load from Sheets on mount
+      const loadFromSheets = useCallback(async () => {
+        setSyncStatus("loading");
+        setSyncMsg("Chargement…");
+        try {
+          const res = await fetch(SCRIPT_URL);
+          const json = await res.json();
+          const newDays = EMPTY_DATA.map((d, i) => {
+            const row = json[i];
+            if (!row) return d;
+            const { h, m } = parseHeures(row.heures);
+            return { jour: d.jour, heures: h, minutes: m };
+          });
+          setDays(newDays);
+          // also save to localStorage as cache
+          localStorage.setItem("tracker-heures", JSON.stringify(newDays));
+          setSyncStatus("ok");
+          setSyncMsg("Synced avec Sheets ✓");
+        } catch (e) {
+          // fallback to localStorage
+          try {
+            const saved = localStorage.getItem("tracker-heures");
+            if (saved) setDays(JSON.parse(saved));
+          } catch {}
+          setSyncStatus("error");
+          setSyncMsg("Hors ligne — données locales");
+        }
+      }, []);
+
+      useEffect(() => { loadFromSheets(); }, []);
+
+      // Save to Sheets + localStorage
+      const saveToSheets = useCallback(async (newDays) => {
+        localStorage.setItem("tracker-heures", JSON.stringify(newDays));
+        setSyncStatus("saving");
+        setSyncMsg("Sauvegarde…");
+        try {
+          const payload = newDays.map(d => ({
+            jour: d.jour,
+            heures: toDecimal(d.heures, d.minutes)
+          }));
+          await fetch(SCRIPT_URL, {
+            method: "POST",
+            body: JSON.stringify(payload),
+            headers: { "Content-Type": "text/plain" }
+          });
+          setSyncStatus("ok");
+          setSyncMsg("Sauvegardé dans Sheets ✓");
+        } catch {
+          setSyncStatus("error");
+          setSyncMsg("Erreur sync — sauvegardé en local");
+        }
+      }, []);
+
+      const openDay = (jour) => {
+        const d = days.find(d => d.jour === jour);
+        setSelected(jour);
+        setInputH(d.heures !== null ? String(d.heures) : "");
+        setInputM(d.minutes !== null ? String(d.minutes) : "");
+      };
+
+      const save = () => {
+        const h = inputH === "" ? null : parseInt(inputH, 10) || 0;
+        const m = inputM === "" ? null : parseInt(inputM, 10) || 0;
+        const isEmpty = h === null && m === null;
+        const newDays = days.map(d =>
+          d.jour === selected
+            ? { ...d, heures: isEmpty ? null : h, minutes: isEmpty ? null : m }
+            : d
+        );
+        setDays(newDays);
+        setSelected(null);
+        saveToSheets(newDays);
+      };
+
+      const clearDay = () => {
+        const newDays = days.map(d =>
+          d.jour === selected ? { ...d, heures: null, minutes: null } : d
+        );
+        setDays(newDays);
+        setSelected(null);
+        saveToSheets(newDays);
+      };
+
+      const totalDecimal = days.reduce((acc, d) => {
+        const val = toDecimal(d.heures, d.minutes);
+        return val !== null ? acc + val : acc;
+      }, 0);
+
+      const filledDays = days.filter(d => toDecimal(d.heures, d.minutes) !== null).length;
+      const maxVal = Math.max(...days.map(d => toDecimal(d.heures, d.minutes) ?? 0), 1);
+      const reste = Math.max(0, OBJECTIF - totalDecimal);
+      const pct = Math.min(100, Math.round((totalDecimal / OBJECTIF) * 100));
+
+      const dotColor = { idle: "#444", loading: "#f39c12", saving: "#f39c12", ok: "#27ae60", error: "#e74c3c" }[syncStatus];
+
+      return (
+        <div style={{ fontFamily: "'DM Mono', monospace", minHeight: "100vh", background: "#0f0f0f", color: "#e8e2d5" }}>
+
+          {/* Sync bar */}
+          <div className="sync-bar">
+            <div className="sync-dot" style={{ background: dotColor }} />
+            <span>{syncMsg}</span>
+            <button className="sync-btn" onClick={loadFromSheets}>
+              {syncStatus === "loading" ? <span className="spinning">↻</span> : "↻ Sync"}
+            </button>
+          </div>
+
+          {/* Header */}
+          <div style={{ padding: "20px 16px 16px", borderBottom: "1px solid #1e1e1e" }}>
+            <div style={{ fontFamily: "'Syne', sans-serif", fontSize: "22px", fontWeight: 800, letterSpacing: "-0.02em", color: "#fff" }}>
+              TRACKER HEURES SFP
+            </div>
+            <div style={{ fontSize: "11px", color: "#555", marginTop: "3px", letterSpacing: "0.08em" }}>
+              {new Date().toLocaleDateString("fr-FR", { month: "long", year: "numeric" }).toUpperCase()} · OBJECTIF {OBJECTIF}H
+            </div>
+
+            <div style={{ display: "flex", gap: "8px", marginTop: "14px" }}>
+              <div className="stat-card">
+                <div style={{ fontSize: "10px", color: "#555", letterSpacing: "0.1em", marginBottom: "3px" }}>TOTAL</div>
+                <div style={{ fontSize: "20px", fontWeight: 500, color: "#ff5c35" }}>{formatDuration(totalDecimal)}</div>
+              </div>
+              <div className="stat-card">
+                <div style={{ fontSize: "10px", color: "#555", letterSpacing: "0.1em", marginBottom: "3px" }}>RESTE</div>
+                <div style={{ fontSize: "20px", fontWeight: 500, color: reste === 0 ? "#27ae60" : "#e8e2d5" }}>
+                  {reste === 0 ? "🎯" : formatDuration(reste)}
+                </div>
+              </div>
+              <div className="stat-card">
+                <div style={{ fontSize: "10px", color: "#555", letterSpacing: "0.1em", marginBottom: "3px" }}>AVANCEMENT</div>
+                <div style={{ fontSize: "20px", fontWeight: 500 }}>{pct}%</div>
+              </div>
+            </div>
+
+            <div style={{ marginTop: "12px", height: "4px", background: "#1e1e1e", borderRadius: "2px", overflow: "hidden" }}>
+              <div style={{ height: "100%", width: `${pct}%`, background: pct >= 100 ? "#27ae60" : "#ff5c35", borderRadius: "2px", transition: "width 0.4s ease" }} />
+            </div>
+          </div>
+
+          {/* Grid */}
+          <div style={{ padding: "16px" }}>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: "5px" }}>
+              {days.map(d => {
+                const decimal = toDecimal(d.heures, d.minutes);
+                const barHeight = decimal !== null ? Math.round((decimal / maxVal) * 100) : 0;
+                const isFilled = decimal !== null;
+                const isToday = d.jour === today;
+                const isSelected = d.jour === selected;
+                return (
+                  <div
+                    key={d.jour}
+                    className={`day-cell${isFilled ? " filled" : ""}${isToday ? " today" : ""}${isSelected ? " selected-cell" : ""}`}
+                    onClick={() => openDay(d.jour)}
+                  >
+                    <div className="bar" style={{ height: `${barHeight}%` }} />
+                    <div style={{ position: "relative", zIndex: 1 }}>
+                      <div style={{ fontSize: "9px", color: isToday ? "#ff5c35" : "#444", marginBottom: "3px" }}>
+                        J{d.jour}{isToday ? "●" : ""}
+                      </div>
+                      <div style={{ fontSize: isFilled ? "12px" : "10px", fontWeight: isFilled ? 500 : 400, color: isFilled ? "#e8e2d5" : "#2a2a2a" }}>
+                        {formatDuration(decimal)}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Bottom sheet */}
+          {selected && (
+            <div style={{ position: "fixed", bottom: 0, left: 0, right: 0, background: "#141414", borderTop: "1px solid #2a2a2a", padding: "20px 16px 32px", zIndex: 100 }}>
+              <div style={{ fontSize: "11px", color: "#555", letterSpacing: "0.1em", marginBottom: "16px" }}>
+                JOUR {selected} — SAISIR LES HEURES
+              </div>
+              <div style={{ display: "flex", gap: "6px", marginBottom: "18px", flexWrap: "wrap" }}>
+                {PRESETS.map(p => (
+                  <button key={p.label} className="preset-btn" onClick={() => { setInputH(String(p.h)); setInputM(String(p.m)); }}>
+                    {p.label}
+                  </button>
+                ))}
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: "12px", marginBottom: "18px" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                  <input className="input-field" type="number" min="0" max="24" placeholder="0" value={inputH} onChange={e => setInputH(e.target.value)} />
+                  <span style={{ color: "#555", fontSize: "16px" }}>h</span>
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                  <input className="input-field" type="number" min="0" max="59" placeholder="0" value={inputM} onChange={e => setInputM(e.target.value)} />
+                  <span style={{ color: "#555", fontSize: "16px" }}>min</span>
+                </div>
+                <div style={{ color: "#ff5c35", fontSize: "20px", fontWeight: 500, minWidth: "50px" }}>
+                  {(inputH || inputM) ? formatDuration(toDecimal(inputH !== "" ? parseInt(inputH) : null, inputM !== "" ? parseInt(inputM) : null)) : ""}
+                </div>
+              </div>
+              <div style={{ display: "flex", gap: "8px" }}>
+                <button className="btn-save" onClick={save}>ENREGISTRER</button>
+                <button className="btn-clear" onClick={clearDay}>Effacer</button>
+                <button className="btn-clear" onClick={() => setSelected(null)} style={{ marginLeft: "auto" }}>✕</button>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+  </script>
+</body>
+</html>
